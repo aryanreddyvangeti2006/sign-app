@@ -1,0 +1,1 @@
+import{t as e}from"./index-D8ICHo7M.js";var t=e();function n(){return(0,t.jsx)(`iframe`,{src:`/sign-avatar.html`,title:`Audio to Sign Language Avatar`,className:`fixed inset-0 h-screen w-screen border-0`})}export{n as component};

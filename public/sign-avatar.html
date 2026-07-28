@@ -1,0 +1,1309 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Audio → 3D Sign Language Avatar</title>
+  <!--
+  Audio → Sign Language Converter (3D edition, GLB-driven).
+  - Loads a rigged Mixamo humanoid (uploaded GLB, served from /__l5e/assets-v1/...).
+  - Falls back to a procedural stick rig if GLB fails or the skeleton is incompatible.
+  - Bone driver maps the existing joint-angle pose system to Mixamo bone names
+    (mixamorig:{Left,Right}{Shoulder,Arm,ForeArm,Hand,Hand<Finger>{1,2,3}}).
+  - Signs live in ./sign-poses.js (letters, numbers, words, multi-step phrases).
+    Adding new signs = editing that data file; core logic stays untouched.
+  - Optional Mixamo idle animation from the GLB plays via AnimationMixer, then
+    the sign driver overrides ONLY arm+hand bones each frame so body still breathes.
+  - Left & Right arm rest poses are independently adjustable via UI sliders.
+  -->
+  <style>
+    :root {
+      --bg: #0f1220;
+      --panel: #171a2e;
+      --ink: #e8ecff;
+      --muted: #8a92b8;
+      --accent: #7c9cff;
+      --accent-2: #63e6be;
+      --line: #232746;
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(1200px 700px at 20% -10%, #1c2246 0%, var(--bg) 60%);
+      color: var(--ink);
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 24px 20px 60px
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px
+    }
+
+    header h1 {
+      font-size: 20px;
+      margin: 0
+    }
+
+    header .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 12px var(--accent)
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 20px
+    }
+
+    @media (max-width:900px) {
+      .grid {
+        grid-template-columns: 1fr
+      }
+    }
+
+    .card {
+      background: linear-gradient(180deg, #191d35, #141731);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .25)
+    }
+
+    .stage {
+      width: 100%;
+      aspect-ratio: 4/3;
+      background: radial-gradient(circle at 50% 35%, #2a3162 0%, #0c0f22 75%);
+      border-radius: 12px;
+      overflow: hidden;
+      position: relative
+    }
+
+    #canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab
+    }
+
+    #canvas:active {
+      cursor: grabbing
+    }
+
+    .loadNote {
+      position: absolute;
+      inset: auto 0 8px 0;
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted)
+    }
+
+    .now {
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 8px;
+      min-height: 20px
+    }
+
+    .now b {
+      color: var(--accent-2)
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: #20264a;
+      color: var(--ink);
+      padding: 9px 12px;
+      border-radius: 9px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px
+    }
+
+    button:hover {
+      background: #2a3160
+    }
+
+    button.primary {
+      background: linear-gradient(180deg, #4b6cff, #3550d8);
+      border-color: #5a75ff
+    }
+
+    button.rec {
+      background: linear-gradient(180deg, #ff5f78, #d63a55);
+      border-color: #ff7a90;
+      animation: pulse 1.2s infinite
+    }
+
+    button.ghost {
+      background: transparent
+    }
+
+    button.on {
+      background: #2c366b;
+      border-color: #4b6cff
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 rgba(255, 95, 120, .45)
+      }
+
+      50% {
+        box-shadow: 0 0 0 10px rgba(255, 95, 120, 0)
+      }
+    }
+
+    .transcript {
+      min-height: 120px;
+      max-height: 220px;
+      overflow: auto;
+      background: #0e1128;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      white-space: pre-wrap;
+      line-height: 1.5
+    }
+
+    .transcript .interim {
+      color: var(--muted);
+      font-style: italic
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px
+    }
+
+    h2 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--muted);
+      margin: 16px 0 8px
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px
+    }
+
+    .speed {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: #0e1128;
+      border: 1px solid var(--line);
+      border-radius: 10px
+    }
+
+    .speed input[type=range] {
+      flex: 1;
+      accent-color: var(--accent)
+    }
+
+    .speed .val {
+      font-variant-numeric: tabular-nums;
+      color: var(--accent-2);
+      font-weight: 700;
+      min-width: 42px;
+      text-align: right
+    }
+
+    .queue {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+      justify-content: center
+    }
+
+    .chip {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #1d224a;
+      border: 1px solid var(--line);
+      color: #c8d0ff
+    }
+
+    .chip.current {
+      background: linear-gradient(180deg, #4b6cff, #3550d8);
+      border-color: #5a75ff;
+      color: #fff
+    }
+
+    /* --- Rest pose controls ------------------------------------------------ */
+    .rest-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 6px
+    }
+
+    .rest-col {
+      background: #0e1128;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      max-height: 480px;
+      overflow-y: auto;
+    }
+
+    .rest-col h3 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--accent-2);
+      margin: 0 0 6px;
+      text-align: center
+    }
+
+    .rest-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 3px 0;
+      font-size: 11px
+    }
+
+    .rest-row label {
+      min-width: 65px;
+      color: var(--muted);
+      font-size: 10px;
+      text-align: right
+    }
+
+    .rest-row input[type=range] {
+      flex: 1;
+      accent-color: var(--accent);
+      height: 4px
+    }
+
+    .rest-row .rval {
+      min-width: 30px;
+      text-align: right;
+      color: var(--accent-2);
+      font-weight: 600;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums
+    }
+
+    .rest-toolbar {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+      justify-content: center
+    }
+
+    .rest-toolbar button {
+      padding: 4px 10px;
+      font-size: 10px
+    }
+  </style>
+  <script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+
+<body>
+  <div class="wrap">
+    <header>
+      <span class="dot"></span>
+      <h1>Audio → 3D Sign Language Avatar</h1>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="stage">
+          <canvas id="canvas"></canvas>
+          <div class="loadNote" id="loadNote">Loading 3D character…</div>
+        </div>
+        <div class="now" id="now">Idle. Press the mic and start speaking.</div>
+        <div class="queue" id="queue"></div>
+        <div class="toolbar">
+          <button id="rotate" class="ghost">↻ Auto-rotate</button>
+          <button id="reset" class="ghost">⌂ Reset view</button>
+          <button id="idleAnim" class="ghost on">😊 Idle motion</button>
+          <span class="hint" style="margin-left:auto">Drag to orbit · scroll to zoom</span>
+        </div>
+
+        <!-- Rest pose manual controls for left & right arms -->
+        <h2>Rest pose (manual adjust)</h2>
+        <div class="rest-grid">
+          <div class="rest-col">
+            <h3>🫲 Left Arm</h3>
+            <div class="rest-row"><label>Shoulder P</label><input type="range" id="restL_sP" min="-90" max="200"
+                value="81" step="1" /><span class="rval" id="rL_sP">0</span></div>
+            <div class="rest-row"><label>Shoulder Y</label><input type="range" id="restL_sY" min="-90" max="90"
+                value="90" step="1" /><span class="rval" id="rL_sY">0</span></div>
+            <div class="rest-row"><label>Shoulder R</label><input type="range" id="restL_sR" min="-90" max="170"
+                value="118" step="1" /><span class="rval" id="rL_sR">0</span></div>
+            <div class="rest-row"><label>Elbow</label><input type="range" id="restL_eP" min="-10" max="150" value="-10"
+                step="1" /><span class="rval" id="rL_eP">5</span></div>
+            <div class="rest-row"><label>Wrist P</label><input type="range" id="restL_wP" min="-90" max="90" value="19"
+                step="1" /><span class="rval" id="rL_wP">0</span></div>
+            <div class="rest-row"><label>Wrist Y</label><input type="range" id="restL_wY" min="-40" max="40" value="-40"
+                step="1" /><span class="rval" id="rL_wY">0</span></div>
+            <div class="rest-row"><label>Wrist R</label><input type="range" id="restL_wR" min="-90" max="90" value="-90"
+                step="1" /><span class="rval" id="rL_wR">0</span></div>
+            <div class="rest-row"><label>Spread</label><input type="range" id="restL_hSpread" min="-20" max="25"
+                value="0" step="1" /><span class="rval" id="rL_hSpread">0</span></div>
+            <div class="rest-row"><label>Thumb MCP</label><input type="range" id="restL_tMCP" min="-30" max="100"
+                value="8" step="1" /><span class="rval" id="rL_tMCP">8</span></div>
+            <div class="rest-row"><label>Thumb PIP</label><input type="range" id="restL_tPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rL_tPIP">6</span></div>
+            <div class="rest-row"><label>Thumb DIP</label><input type="range" id="restL_tDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rL_tDIP">3</span></div>
+            <div class="rest-row"><label>Index MCP</label><input type="range" id="restL_iMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rL_iMCP">6</span></div>
+            <div class="rest-row"><label>Index PIP</label><input type="range" id="restL_iPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rL_iPIP">6</span></div>
+            <div class="rest-row"><label>Index DIP</label><input type="range" id="restL_iDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rL_iDIP">3</span></div>
+            <div class="rest-row"><label>Middle MCP</label><input type="range" id="restL_mMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rL_mMCP">6</span></div>
+            <div class="rest-row"><label>Middle PIP</label><input type="range" id="restL_mPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rL_mPIP">6</span></div>
+            <div class="rest-row"><label>Middle DIP</label><input type="range" id="restL_mDIP" min="0" max="80"
+                value="3" step="1" /><span class="rval" id="rL_mDIP">3</span></div>
+            <div class="rest-row"><label>Ring MCP</label><input type="range" id="restL_rMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rL_rMCP">6</span></div>
+            <div class="rest-row"><label>Ring PIP</label><input type="range" id="restL_rPIP" min="0" max="110" value="6"
+                step="1" /><span class="rval" id="rL_rPIP">6</span></div>
+            <div class="rest-row"><label>Ring DIP</label><input type="range" id="restL_rDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rL_rDIP">3</span></div>
+            <div class="rest-row"><label>Pinky MCP</label><input type="range" id="restL_pMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rL_pMCP">6</span></div>
+            <div class="rest-row"><label>Pinky PIP</label><input type="range" id="restL_pPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rL_pPIP">6</span></div>
+            <div class="rest-row"><label>Pinky DIP</label><input type="range" id="restL_pDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rL_pDIP">3</span></div>
+            <div class="rest-toolbar">
+              <button class="ghost" id="resetRestL">Reset left</button>
+              <button class="ghost" id="applyRestL">Apply to sign</button>
+            </div>
+          </div>
+          <div class="rest-col">
+            <h3>🫱 Right Arm</h3>
+            <div class="rest-row"><label>Shoulder P</label><input type="range" id="restR_sP" min="-90" max="200"
+                value="-59" step="1" /><span class="rval" id="rR_sP">0</span></div>
+            <div class="rest-row"><label>Shoulder Y</label><input type="range" id="restR_sY" min="-90" max="90"
+                value="-35" step="1" /><span class="rval" id="rR_sY">0</span></div>
+            <div class="rest-row"><label>Shoulder R</label><input type="range" id="restR_sR" min="-90" max="170"
+                value="69" step="1" /><span class="rval" id="rR_sR">0</span></div>
+            <div class="rest-row"><label>Elbow</label><input type="range" id="restR_eP" min="-10" max="150" value="0"
+                step="1" /><span class="rval" id="rR_eP">5</span></div>
+            <div class="rest-row"><label>Wrist P</label><input type="range" id="restR_wP" min="-90" max="90" value="2"
+                step="1" /><span class="rval" id="rR_wP">0</span></div>
+            <div class="rest-row"><label>Wrist Y</label><input type="range" id="restR_wY" min="-40" max="40" value="11"
+                step="1" /><span class="rval" id="rR_wY">0</span></div>
+            <div class="rest-row"><label>Wrist R</label><input type="range" id="restR_wR" min="-90" max="90" value="-90"
+                step="1" /><span class="rval" id="rR_wR">0</span></div>
+            <div class="rest-row"><label>Spread</label><input type="range" id="restR_hSpread" min="-20" max="25"
+                value="0" step="1" /><span class="rval" id="rR_hSpread">0</span></div>
+            <div class="rest-row"><label>Thumb MCP</label><input type="range" id="restR_tMCP" min="-30" max="100"
+                value="8" step="1" /><span class="rval" id="rR_tMCP">8</span></div>
+            <div class="rest-row"><label>Thumb PIP</label><input type="range" id="restR_tPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rR_tPIP">6</span></div>
+            <div class="rest-row"><label>Thumb DIP</label><input type="range" id="restR_tDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rR_tDIP">3</span></div>
+            <div class="rest-row"><label>Index MCP</label><input type="range" id="restR_iMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rR_iMCP">6</span></div>
+            <div class="rest-row"><label>Index PIP</label><input type="range" id="restR_iPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rR_iPIP">6</span></div>
+            <div class="rest-row"><label>Index DIP</label><input type="range" id="restR_iDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rR_iDIP">3</span></div>
+            <div class="rest-row"><label>Middle MCP</label><input type="range" id="restR_mMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rR_mMCP">6</span></div>
+            <div class="rest-row"><label>Middle PIP</label><input type="range" id="restR_mPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rR_mPIP">6</span></div>
+            <div class="rest-row"><label>Middle DIP</label><input type="range" id="restR_mDIP" min="0" max="80"
+                value="3" step="1" /><span class="rval" id="rR_mDIP">3</span></div>
+            <div class="rest-row"><label>Ring MCP</label><input type="range" id="restR_rMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rR_rMCP">6</span></div>
+            <div class="rest-row"><label>Ring PIP</label><input type="range" id="restR_rPIP" min="0" max="110" value="6"
+                step="1" /><span class="rval" id="rR_rPIP">6</span></div>
+            <div class="rest-row"><label>Ring DIP</label><input type="range" id="restR_rDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rR_rDIP">3</span></div>
+            <div class="rest-row"><label>Pinky MCP</label><input type="range" id="restR_pMCP" min="-30" max="100"
+                value="6" step="1" /><span class="rval" id="rR_pMCP">6</span></div>
+            <div class="rest-row"><label>Pinky PIP</label><input type="range" id="restR_pPIP" min="0" max="110"
+                value="6" step="1" /><span class="rval" id="rR_pPIP">6</span></div>
+            <div class="rest-row"><label>Pinky DIP</label><input type="range" id="restR_pDIP" min="0" max="80" value="3"
+                step="1" /><span class="rval" id="rR_pDIP">3</span></div>
+            <div class="rest-toolbar">
+              <button class="ghost" id="resetRestR">Reset right</button>
+              <button class="ghost" id="applyRestR">Apply to sign</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-top:0">Controls</h2>
+        <div class="toolbar">
+          <button id="mic" class="primary">🎤 Start listening</button>
+          <button id="pause" class="ghost" disabled>⏸ Pause</button>
+          <button id="replay" class="ghost" disabled>↻ Replay</button>
+          <button id="clear" class="ghost">Clear</button>
+        </div>
+
+        <h2>Type to sign</h2>
+        <div class="toolbar" style="gap:6px">
+          <input id="textInput" type="text" placeholder="Type a word or sentence…"
+            style="flex:1;min-width:0;background:#0e1128;color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:9px 12px;font-size:13px;outline:none" />
+          <button id="translateBtn" class="primary">▶ Translate</button>
+        </div>
+        <div class="hint" style="margin-top:6px">Type instead of (or alongside) speaking. Same speed & controls apply.
+        </div>
+
+        <h2>Signing speed</h2>
+        <div class="speed">
+          <button data-sp="0.5" class="ghost">0.5×</button>
+          <button data-sp="1" class="ghost on">1×</button>
+          <button data-sp="1.5" class="ghost">1.5×</button>
+          <button data-sp="2" class="ghost">2×</button>
+          <input id="speed" type="range" min="0.3" max="2.5" step="0.1" value="1" />
+          <span class="val" id="speedVal">1.0×</span>
+        </div>
+        <div class="hint" style="margin-top:6px">Adjustable during playback.</div>
+
+        <h2>Live transcript</h2>
+        <div class="transcript" id="transcript" aria-live="polite"></div>
+        <div class="meta">
+          <span id="status">Ready</span>
+          <span id="counter">0 words</span>
+        </div>
+
+        <h2>Try saying</h2>
+        <div class="hint">Words (85+): hello, hi, thank you, please, sorry, yes, no, help, name, good, bad, love,
+          family, friend, water, food, more, stop, go, wait, understand, welcome, me, you, happy, sad, like, dislike,
+          what, morning, night, goodbye, excuse, bless, mother, father, sister, brother, baby, child, boy, girl,
+          eat, drink, sleep, work, play, read, write, talk, listen, look, give, take,
+          angry, scared, tired, sick, hungry, thirsty, bored, confused, surprised,
+          home, school, college, car, house, money, time, today, tomorrow, yesterday,
+          phone, computer, music, dance, travel, party,
+          hospital, store, park, beach, sun, rain, snow, cloud,
+          problem, solution, important, difficult, easy.
+          Phrases: "how are you", "nice to meet you", "see you later". Numbers 0–9. Others fingerspelled.</div>
+        <div class="hint" id="hint" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { LETTER_SHAPE, LETTER_TWEAK, NUMBER_SHAPE, WORDS as WORD_DATA } from '/sign-poses.js';
+    // Local URL of the uploaded Mixamo GLB avatar model.
+    const AVATAR_URL = '/avatar.glb';
+
+    /* --- Scene / camera / lights ------------------------------------------ */
+    const canvas = document.getElementById('canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x0c0f22, 4, 12);
+
+    const camera = new THREE.PerspectiveCamera(38, 1, 0.05, 100);
+    const CAM_DEFAULT = new THREE.Vector3(0, 1.45, 2.4);
+    const CAM_TARGET = new THREE.Vector3(0, 1.30, 0);
+    camera.position.copy(CAM_DEFAULT);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.copy(CAM_TARGET);
+    controls.enablePan = false;
+    controls.minDistance = 0.8; controls.maxDistance = 6;
+    controls.minPolarAngle = 0.2; controls.maxPolarAngle = Math.PI * 0.62;
+    controls.enableDamping = true; controls.autoRotateSpeed = 1.4;
+
+    function resize() {
+      const r = canvas.getBoundingClientRect();
+      renderer.setSize(r.width, r.height, false);
+      camera.aspect = r.width / r.height; camera.updateProjectionMatrix();
+    }
+    new ResizeObserver(resize).observe(canvas); resize();
+
+    scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x2a1a3a, 0.7));
+    const key = new THREE.DirectionalLight(0xffffff, 1.2);
+    key.position.set(2, 3.5, 2.5); key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.camera.near = 0.5; key.shadow.camera.far = 10;
+    key.shadow.camera.left = -2; key.shadow.camera.right = 2; key.shadow.camera.top = 3; key.shadow.camera.bottom = -1;
+    scene.add(key);
+    scene.add(new THREE.DirectionalLight(0x8aa4ff, 0.4).translateX(-2).translateY(2).translateZ(-1.5));
+
+    const floor = new THREE.Mesh(new THREE.CircleGeometry(4, 48), new THREE.ShadowMaterial({ opacity: 0.35 }));
+    floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+
+    /* --- Placeholder procedural rig (fallback + placeholder pre-load) ----- */
+    const MAT = {
+      skin: new THREE.MeshStandardMaterial({ color: 0xf3caa4, roughness: 0.7 }),
+      shirt: new THREE.MeshStandardMaterial({ color: 0x3d55d8, roughness: 0.55 }),
+      hand: new THREE.MeshStandardMaterial({ color: 0xf7d0a8, roughness: 0.6 })
+    };
+    const placeholder = new THREE.Group();
+    {
+      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.34, 0.9, 24), MAT.shirt);
+      torso.position.y = 1.15; torso.castShadow = true; placeholder.add(torso);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 20, 16), MAT.skin);
+      head.position.y = 1.75; head.castShadow = true; placeholder.add(head);
+    }
+    scene.add(placeholder);
+
+    /* --- Pose model ------------------------------------------------------- */
+    const DEG = Math.PI / 180;
+    // Default rest pose values — used for initialisation and "Apply to sign" button.
+    function REST_DEFAULTS_L() {
+      return {
+        shoulder: { pitch: 81, yaw: 90, roll: 118 },
+        elbow: { pitch: -10 },
+        wrist: { pitch: 19, yaw: -40, roll: -90 },
+        hand: {
+          spread: 0,
+          thumb: { mcp: 8, pip: 6, dip: 3 },
+          index: { mcp: 6, pip: 6, dip: 3 },
+          middle: { mcp: 6, pip: 6, dip: 3 },
+          ring: { mcp: 6, pip: 6, dip: 3 },
+          pinky: { mcp: 6, pip: 6, dip: 3 }
+        }
+      };
+    }
+
+    function REST_DEFAULTS_R() {
+      return {
+        shoulder: { pitch: -59, yaw: -35, roll: 69 },
+        elbow: { pitch: 0 },
+        wrist: { pitch: 2, yaw: 11, roll: -90 },
+        hand: {
+          spread: 0,
+          thumb: { mcp: 8, pip: 6, dip: 3 },
+          index: { mcp: 6, pip: 6, dip: 3 },
+          middle: { mcp: 6, pip: 6, dip: 3 },
+          ring: { mcp: 6, pip: 6, dip: 3 },
+          pinky: { mcp: 6, pip: 6, dip: 3 }
+        }
+      };
+    }
+    // Mutable per-side rest poses — adjustable independently via UI sliders.
+    let REST_L = REST_DEFAULTS_L();
+    let REST_R = REST_DEFAULTS_R();
+    const REST_TARGET = () => ({ armL: REST_L, armR: REST_R });
+
+    // Human joint-angle safety limits (degrees) — clamp applied per frame to prevent
+    // broken/hyperextended poses from bad data. Elbow can't bend backward, shoulder
+    // stays inside anatomical range, finger joints stay within flexion range.
+    const LIMITS = {
+      shoulder: { pitch: [-30, 170], yaw: [-90, 90], roll: [-30, 170] },
+      elbow: { pitch: [0, 150] },
+      wrist: { pitch: [-80, 80], yaw: [-30, 30], roll: [-90, 90] },
+      finger: { mcp: [-30, 100], pip: [0, 110], dip: [0, 80] },
+      spread: [-20, 25]
+    };
+    const clamp = (v, [lo, hi]) => v < lo ? lo : v > hi ? hi : v;
+    function clampPose(p) {
+      const s = p.shoulder, e = p.elbow, w = p.wrist, h = p.hand;
+      s.pitch = clamp(s.pitch, LIMITS.shoulder.pitch);
+      s.yaw = clamp(s.yaw, LIMITS.shoulder.yaw);
+      s.roll = clamp(s.roll, LIMITS.shoulder.roll);
+      e.pitch = clamp(e.pitch, LIMITS.elbow.pitch);
+      w.pitch = clamp(w.pitch, LIMITS.wrist.pitch);
+      w.yaw = clamp(w.yaw, LIMITS.wrist.yaw);
+      w.roll = clamp(w.roll, LIMITS.wrist.roll);
+      h.spread = clamp(h.spread ?? 0, LIMITS.spread);
+      for (const f of FINGER_ORDER) {
+        const fp = h[f]; if (!fp) continue;
+        fp.mcp = clamp(fp.mcp, LIMITS.finger.mcp);
+        fp.pip = clamp(fp.pip, LIMITS.finger.pip);
+        fp.dip = clamp(fp.dip, LIMITS.finger.dip);
+      }
+      return p;
+    }
+    const FINGER_ORDER = ['thumb', 'index', 'middle', 'ring', 'pinky'];
+
+    const SHAPE = {
+      OPEN: { thumb: { mcp: -15, pip: 0, dip: 0 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 0, pip: 0, dip: 0 }, ring: { mcp: 0, pip: 0, dip: 0 }, pinky: { mcp: 0, pip: 0, dip: 0 }, spread: 12 },
+      FLAT: { thumb: { mcp: 15, pip: 15, dip: 5 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 0, pip: 0, dip: 0 }, ring: { mcp: 0, pip: 0, dip: 0 }, pinky: { mcp: 0, pip: 0, dip: 0 }, spread: 0 },
+      FIST: { thumb: { mcp: -30, pip: 0, dip: 1 }, index: { mcp: 80, pip: 95, dip: 65 }, middle: { mcp: 80, pip: 95, dip: 65 }, ring: { mcp: 80, pip: 95, dip: 65 }, pinky: { mcp: 80, pip: 95, dip: 65 }, spread: 0 },
+      POINT: { thumb: { mcp: 30, pip: 45, dip: 20 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 85, pip: 100, dip: 65 }, ring: { mcp: 85, pip: 100, dip: 65 }, pinky: { mcp: 85, pip: 100, dip: 65 }, spread: 0 },
+      V: { thumb: { mcp: 35, pip: 45, dip: 20 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 0, pip: 0, dip: 0 }, ring: { mcp: 85, pip: 100, dip: 65 }, pinky: { mcp: 85, pip: 100, dip: 65 }, spread: 22 },
+      W: { thumb: { mcp: 35, pip: 55, dip: 25 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 0, pip: 0, dip: 0 }, ring: { mcp: 0, pip: 0, dip: 0 }, pinky: { mcp: 85, pip: 100, dip: 65 }, spread: 18 },
+      Y: { thumb: { mcp: -45, pip: 0, dip: 0 }, index: { mcp: 85, pip: 100, dip: 65 }, middle: { mcp: 85, pip: 100, dip: 65 }, ring: { mcp: 85, pip: 100, dip: 65 }, pinky: { mcp: 0, pip: 0, dip: 0 }, spread: 10 },
+      L: { thumb: { mcp: -55, pip: 0, dip: 0 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 85, pip: 100, dip: 65 }, ring: { mcp: 85, pip: 100, dip: 65 }, pinky: { mcp: 85, pip: 100, dip: 65 }, spread: 0 },
+      I: { thumb: { mcp: 25, pip: 35, dip: 20 }, index: { mcp: 85, pip: 100, dip: 65 }, middle: { mcp: 85, pip: 100, dip: 65 }, ring: { mcp: 85, pip: 100, dip: 65 }, pinky: { mcp: 0, pip: 0, dip: 0 }, spread: 0 },
+      O: { thumb: { mcp: 15, pip: 35, dip: 35 }, index: { mcp: 30, pip: 55, dip: 35 }, middle: { mcp: 30, pip: 55, dip: 35 }, ring: { mcp: 30, pip: 55, dip: 35 }, pinky: { mcp: 30, pip: 55, dip: 35 }, spread: 0 },
+      C: { thumb: { mcp: 10, pip: 25, dip: 15 }, index: { mcp: 20, pip: 35, dip: 20 }, middle: { mcp: 20, pip: 35, dip: 20 }, ring: { mcp: 20, pip: 35, dip: 20 }, pinky: { mcp: 20, pip: 35, dip: 20 }, spread: 6 },
+      E: { thumb: { mcp: 20, pip: 30, dip: 20 }, index: { mcp: 50, pip: 70, dip: 50 }, middle: { mcp: 50, pip: 70, dip: 50 }, ring: { mcp: 50, pip: 70, dip: 50 }, pinky: { mcp: 50, pip: 70, dip: 50 }, spread: 0 },
+      F: { thumb: { mcp: 25, pip: 55, dip: 45 }, index: { mcp: 30, pip: 65, dip: 50 }, middle: { mcp: 0, pip: 0, dip: 0 }, ring: { mcp: 0, pip: 0, dip: 0 }, pinky: { mcp: 0, pip: 0, dip: 0 }, spread: 14 },
+      R: { thumb: { mcp: 30, pip: 45, dip: 25 }, index: { mcp: 0, pip: 0, dip: 0 }, middle: { mcp: 0, pip: 5, dip: 0 }, ring: { mcp: 85, pip: 100, dip: 65 }, pinky: { mcp: 85, pip: 100, dip: 65 }, spread: -8 },
+      HOOK: { thumb: { mcp: 15, pip: 15, dip: 10 }, index: { mcp: 0, pip: 55, dip: 40 }, middle: { mcp: 0, pip: 55, dip: 40 }, ring: { mcp: 0, pip: 55, dip: 40 }, pinky: { mcp: 0, pip: 55, dip: 40 }, spread: 6 }
+    };
+
+    function armAt({ shape, pitch = 57, yaw = -29, roll = 6, elbow = 85, wristPitch = -25, wristRoll = -90, wristYaw = 13 }) {
+      // Shift signing pitch up to chest level. (Palm-facing is corrected separately,
+      // in applyArmBones via wristRollBias — this pitch bump only affects height.)
+      const adjustedPitch = pitch + 18;
+      return {
+        shoulder: { pitch: adjustedPitch, yaw, roll }, elbow: { pitch: elbow },
+        wrist: { pitch: wristPitch, roll: wristRoll, yaw: wristYaw },
+        hand: { ...SHAPE[shape] }
+      };
+    }
+    function SIGN(shape, over = {}, hold = 340, shapeL = null, overL = null) {
+      const armR = armAt({ shape, ...over });
+      const armL = shapeL ? armAt({ shape: shapeL, ...overL }) : REST_L;
+      return { armL, armR, hold };
+    }
+    // Compile the exported data (which references shape names) into ready arm poses.
+    const WORDS = {};
+    for (const [k, steps] of Object.entries(WORD_DATA)) {
+      WORDS[k] = steps.map(s => SIGN(s.shape, s.over, s.hold, s.shapeL, s.overL));
+    }
+    function letterPose(ch) {
+      const shape = LETTER_SHAPE[ch]; if (!shape) return null;
+      return SIGN(shape, LETTER_TWEAK[ch] || {});
+    }
+    function numberPose(ch) {
+      const shape = NUMBER_SHAPE[ch]; if (!shape) return null;
+      return SIGN(shape, {});
+    }
+
+    /* --- Tween --------------------------------------------------------- */
+    function lerp(a, b, t) { return a + (b - a) * t; }
+    // Spring-like easing — slight overshoot then settle, like Hand Talk's natural motion.
+    function springEasing(t) {
+      if (t <= 0) return 0; if (t >= 1) return 1;
+      const d = 0.90, o = 9, p = Math.atan2(Math.sqrt(1 - d * d), d);
+      return 1 - Math.exp(-d * o * t) * Math.sin(o * t * Math.sqrt(1 - d * d) + p) / Math.sin(p);
+    }
+    function naturalEase(t, isHold) { return isHold ? (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2) : springEasing(t); }
+    const easeInOutCubic = springEasing; // alias for legacy callers
+    function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
+    function deepLerp(from, to, t) {
+      if (typeof to === 'number') return lerp(from ?? 0, to, t);
+      const out = {};
+      for (const k in to) {
+        if (typeof to[k] === 'number') out[k] = lerp((from?.[k]) ?? 0, to[k], t);
+        else if (to[k] && typeof to[k] === 'object') out[k] = deepLerp(from?.[k], to[k], t);
+        else out[k] = to[k];
+      }
+      return out;
+    }
+
+    let state = { armL: deepClone(REST_L), armR: deepClone(REST_R) };
+    let SPEED = 1.0;
+    let paused = false, pauseResume = null;
+
+    /* --- Bone-driven rig (populated after GLB loads) --------------------- */
+    let boneRig = null;    // { armL:{...}, armR:{...} }
+    let mixer = null;
+    let idleAction = null;
+    let idleOn = true;
+
+    function findBones(root) {
+      const bones = {};
+      root.traverse(o => { if (o.isBone) bones[o.name] = o; });
+      console.log('[avatar] bones found:', Object.keys(bones));
+
+      const pick = (patterns) => {
+        for (const p of patterns) {
+          const rx = new RegExp(p, 'i');
+          for (const n in bones) if (rx.test(n)) return bones[n];
+        }
+        return null;
+      };
+      const mapSide = (SIDE) => {
+        const s = SIDE; // 'Left' or 'Right'
+        return {
+          shoulder: pick([`${s}Shoulder`, `Shoulder.*${s[0]}`, `${s[0]}.*Shoulder`]),
+          upperArm: pick([`${s}Arm(?!Roll)`, `UpperArm.*${s[0]}`, `${s[0]}.*UpperArm`]),
+          elbow: pick([`${s}ForeArm`, `ForeArm.*${s[0]}`, `LowerArm.*${s[0]}`]),
+          wrist: pick([`${s}Hand(?!Thumb|Index|Middle|Ring|Pinky|Little)`, `Hand.*${s[0]}$`]),
+          fingers: {
+            thumb: { mcp: pick([`${s}HandThumb1`]), pip: pick([`${s}HandThumb2`]), dip: pick([`${s}HandThumb3`]) },
+            index: { mcp: pick([`${s}HandIndex1`]), pip: pick([`${s}HandIndex2`]), dip: pick([`${s}HandIndex3`]) },
+            middle: { mcp: pick([`${s}HandMiddle1`]), pip: pick([`${s}HandMiddle2`]), dip: pick([`${s}HandMiddle3`]) },
+            ring: { mcp: pick([`${s}HandRing1`]), pip: pick([`${s}HandRing2`]), dip: pick([`${s}HandRing3`]) },
+            pinky: {
+              mcp: pick([`${s}HandPinky1`, `${s}HandLittle1`]),
+              pip: pick([`${s}HandPinky2`, `${s}HandLittle2`]),
+              dip: pick([`${s}HandPinky3`, `${s}HandLittle3`])
+            }
+          }
+        };
+      };
+      const armL = mapSide('Left');
+      const armR = mapSide('Right');
+      const ok = !!(armR.upperArm && armR.elbow && armR.wrist);
+      if (!ok) { console.warn('[avatar] required arm bones missing — falling back to procedural rig.'); return null; }
+      // Snapshot rest quaternions (Mixamo T-pose) for additive pose composition.
+      const snap = (b) => { if (b) b.userData._rest = b.quaternion.clone(); };
+      const snapAll = (rig) => {
+        snap(rig.shoulder); snap(rig.upperArm); snap(rig.elbow); snap(rig.wrist);
+        for (const f of FINGER_ORDER) { snap(rig.fingers[f].mcp); snap(rig.fingers[f].pip); snap(rig.fingers[f].dip); }
+      };
+      snapAll(armL); snapAll(armR);
+      const hasFingers = !!(armR.fingers.index.mcp && armR.fingers.thumb.mcp);
+      console.log('[avatar] finger bones available:', hasFingers);
+      // --- Hand scale bump ---------------------------------------------------
+      // Scale up the wrist bone uniformly so the whole hand+fingers (children of the
+      // wrist) grow while the forearm stays proportional. Kept uniform so the scale-
+      // drift guard below doesn't flag it, and applied on the *bone* not the mesh so
+      // skinning stays consistent. ~1.25x reads clearly without looking cartoonish.
+      const HAND_SCALE = 1.25;
+      if (armL.wrist) armL.wrist.scale.setScalar(HAND_SCALE);
+      if (armR.wrist) armR.wrist.scale.setScalar(HAND_SCALE);
+      // NOTE: if hasFingers were false, fingerspelling detail would degrade — the driver still runs;
+      // finger writes just no-op. This model has full finger bones so we're good.
+      armL.mirror = true; armR.mirror = false;
+      armL.hasFingers = hasFingers; armR.hasFingers = hasFingers;
+      return { armL, armR };
+    }
+
+    // Apply a single pose object to one arm rig by composing rest * delta on each bone.
+    const _q = new THREE.Quaternion();
+    const _e = new THREE.Euler();
+    function applyBoneDelta(bone, ex, ey, ez) {
+      if (!bone || !bone.userData._rest) return;
+      _e.set(ex, ey, ez, 'XYZ');
+      _q.setFromEuler(_e);
+      bone.quaternion.copy(bone.userData._rest).multiply(_q);
+    }
+    function applyArmBones(rig, p) {
+      if (!rig) return;
+      const m = rig.mirror ? -1 : 1;
+      // Shoulder (upperArm bone): from Mixamo T-pose (arm points sideways),
+      //   +pitch  -> raise arm forward (rot around local Z is along-body axis for arm-out-to-side pose)
+      //   +roll   -> raise arm out to the side / up (rot around local X)
+      //   +yaw    -> twist along the arm (local Y = bone length)
+      // Axis assignments below produce readable signing motion; may not be biomechanically exact.
+      const sh = p.shoulder;
+      // Base "arms down + forward for signing" bias so rest = arms in signing-ready position:
+      const biasRoll = -80 * DEG; // rotate arm from T-pose down toward the body
+      const biasPitch = 40 * DEG; // then swing forward in front of chest
+      applyBoneDelta(rig.upperArm,
+        biasPitch * m + (-sh.pitch) * DEG * m,          // local X: forward/back swing
+        (sh.yaw) * DEG * m,                            // local Y: twist
+        biasRoll * m + (sh.roll) * DEG * m             // local Z: abduction
+      );
+      applyBoneDelta(rig.shoulder, 0, 0, 0); // keep shoulder blade at rest
+      // Elbow: bend around local X (positive = flex).
+      const el = p.elbow;
+      applyBoneDelta(rig.elbow, (-el.pitch) * DEG * m, 0, 0);
+      // Wrist
+      const wr = p.wrist;
+      // Bias so the palm supinates toward the viewer by default — without this, the
+      // forearm's natural twist rolls the palm away and the sign is hard to read.
+      // If the hand still faces the wrong way after testing, flip the sign to -90.
+      const wristRollBias = 90 * DEG;
+      applyBoneDelta(rig.wrist,
+        (wr.pitch) * DEG,
+        (wr.yaw) * DEG * m,
+        wristRollBias * m + (wr.roll) * DEG * m
+      );
+      // Fingers — curl around local X. Mirror flips sign.
+      if (!rig.hasFingers) return;
+      const spread = ((p.hand.spread ?? 0)) * DEG;
+      const spreadMap = { thumb: -2.0, index: -1, middle: 0, ring: 1, pinky: 2.0 };
+      for (const name of FINGER_ORDER) {
+        const f = rig.fingers[name]; const fp = p.hand[name];
+        if (!f.mcp) continue;
+        applyBoneDelta(f.mcp, (fp.mcp) * DEG, 0, spread * spreadMap[name] * m);
+        applyBoneDelta(f.pip, (fp.pip) * DEG, 0, 0);
+        applyBoneDelta(f.dip, (fp.dip) * DEG, 0, 0);
+      }
+    }
+
+    function applyState() {
+      if (boneRig) {
+        applyArmBones(boneRig.armL, clampPose(state.armL));
+        applyArmBones(boneRig.armR, clampPose(state.armR));
+      }
+    }
+    applyState();
+
+    function tweenTo(target, baseDuration) {
+      return new Promise(resolve => {
+        const from = deepClone(state);
+        const duration = baseDuration / SPEED;
+        const t0 = performance.now();
+        function step(now) {
+          if (paused) { pauseResume = () => requestAnimationFrame(step); return; }
+          const t = Math.min(1, (now - t0) / duration);
+          const e = easeInOutCubic(t);
+          state = {
+            armL: deepLerp(from.armL, target.armL, e),
+            armR: deepLerp(from.armR, target.armR, e)
+          };
+          applyState();
+          if (t < 1) requestAnimationFrame(step); else resolve();
+        }
+        requestAnimationFrame(step);
+      });
+    }
+
+    /* --- GLB LOAD ------------------------------------------------------- */
+    const loader = new GLTFLoader();
+    const loadNote = document.getElementById('loadNote');
+    loader.load(AVATAR_URL, (gltf) => {
+      const model = gltf.scene;
+      model.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+
+      // Center + scale so the avatar's feet sit on y=0 and the character is ~1.75m tall.
+      // Add model FIRST so bones/skinned meshes update world matrices before measuring.
+      scene.add(model);
+      model.updateMatrixWorld(true); 3
+      const box = new THREE.Box3().setFromObject(model);
+      const size = new THREE.Vector3(); box.getSize(size);
+      console.log('[avatar] raw size:', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2));
+      const scale = 1.75 / Math.max(size.y, 0.001);
+      model.scale.setScalar(scale);
+      model.updateMatrixWorld(true);
+      const box2 = new THREE.Box3().setFromObject(model);
+      const center = new THREE.Vector3(); box2.getCenter(center);
+      model.position.x -= center.x;
+      model.position.z -= center.z;
+      model.position.y -= box2.min.y;
+
+      // Refocus camera on upper body / hands.
+      const finalBox = new THREE.Box3().setFromObject(model);
+      const top = finalBox.max.y;
+      const chest = top * 0.72;
+      CAM_TARGET.set(0, chest, 0);
+      CAM_DEFAULT.set(0, chest + 0.05, top * 1.35);
+      controls.target.copy(CAM_TARGET);
+      camera.position.copy(CAM_DEFAULT);
+
+      // Embedded animations
+      if (gltf.animations && gltf.animations.length) {
+        console.log('[avatar] animations:', gltf.animations.map(a => a.name));
+        mixer = new THREE.AnimationMixer(model);
+        // Keep ONLY rotation (quaternion) tracks and drop anything that touches arm/hand
+        // bones — otherwise the idle clip writes bone positions/scales that combine with
+        // our rotation overrides and cause the classic "stretched arms" deformation.
+        const clip = gltf.animations[0].clone();
+        const ARM_RX = /(Shoulder|Arm|ForeArm|Hand|Thumb|Index|Middle|Ring|Pinky|Little)/i;
+        clip.tracks = clip.tracks.filter(t =>
+          /\.quaternion$/.test(t.name) && !ARM_RX.test(t.name)
+        );
+        idleAction = mixer.clipAction(clip);
+        idleAction.play();
+      }
+
+      boneRig = findBones(model);
+      if (boneRig) {
+        placeholder.visible = false;
+        loadNote.remove();
+        // Initialise to rest pose so hands start in front of the body, not clipping.
+        state = { armL: deepClone(REST_L), armR: deepClone(REST_R) };
+        applyState();
+        // One-time scale-drift check: any bone whose world scale drifts from ~1 signals
+        // that something is writing bone.scale (bug we must not reintroduce).
+        setTimeout(() => {
+          model.updateMatrixWorld(true);
+          const s = new THREE.Vector3();
+          model.traverse(o => {
+            if (!o.isBone) return;
+            o.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+            if (Math.abs(s.x - s.y) > 0.05 || Math.abs(s.y - s.z) > 0.05) {
+              console.warn('[avatar] non-uniform bone scale on', o.name, s.toArray());
+            }
+          });
+        }, 500);
+      } else {
+        loadNote.textContent = 'Skeleton not recognised — using placeholder rig.';
+      }
+    }, (evt) => {
+      if (evt.total) loadNote.textContent = `Loading character… ${Math.round(evt.loaded / evt.total * 100)}%`;
+    }, (err) => {
+      console.error('[avatar] GLB load failed:', err);
+      loadNote.textContent = 'Failed to load 3D character — using placeholder.';
+    });
+
+    /* --- Tokenizer + queue + player ------------------------------------- */
+    const queueEl = document.getElementById('queue');
+    const nowEl = document.getElementById('now');
+    const queue = [];
+    let playing = false, currentToken = null, lastSentence = [];
+
+    function tokenize(text) {
+      const tokens = [];
+      const sorted = Object.keys(WORDS).sort((a, b) => b.length - a.length);
+      let s = text.toUpperCase().trim().replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+      outer: while (s.length) {
+        for (const w of sorted) {
+          if (s === w || s.startsWith(w + ' ')) {
+            tokens.push({ label: w.toLowerCase(), poses: WORDS[w] });
+            s = s.slice(w.length).trim();
+            continue outer;
+          }
+        }
+        const sp = s.indexOf(' ');
+        const chunk = sp === -1 ? s : s.slice(0, sp);
+        s = sp === -1 ? '' : s.slice(sp + 1);
+        for (const ch of chunk) {
+          if (/[A-Z]/.test(ch)) { const p = letterPose(ch); if (p) tokens.push({ label: ch, poses: [p] }); }
+          else if (/[0-9]/.test(ch)) { const p = numberPose(ch); if (p) tokens.push({ label: ch, poses: [p] }); }
+        }
+      }
+      return tokens;
+    }
+
+    function renderQueue() {
+      queueEl.innerHTML = '';
+      if (currentToken) {
+        const c = document.createElement('span'); c.className = 'chip current'; c.textContent = currentToken.label; queueEl.appendChild(c);
+      }
+      queue.slice(0, 20).forEach(t => { const el = document.createElement('span'); el.className = 'chip'; el.textContent = t.label; queueEl.appendChild(el); });
+      if (queue.length > 20) { const m = document.createElement('span'); m.className = 'chip'; m.textContent = `+${queue.length - 20}`; queueEl.appendChild(m); }
+    }
+
+    function enqueueText(text) {
+      const toks = tokenize(text);
+      for (const t of toks) queue.push(t);
+      lastSentence = lastSentence.concat(toks);
+      renderQueue();
+      if (!playing) playLoop();
+    }
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function playLoop() {
+      playing = true;
+      while (queue.length) {
+        if (paused) await new Promise(r => pauseResume = r);
+        currentToken = queue.shift();
+        renderQueue();
+        nowEl.innerHTML = `Signing: <b>${currentToken.label}</b>`;
+        const steps = currentToken.poses;
+        for (let i = 0; i < steps.length; i++) {
+          const p = steps[i];
+          // Hand Talk-style: fluid transitions — blend directly between poses
+          // without returning to rest. The spring easing handles the natural
+          // overshoot and settle.
+          await tweenTo(p, 280);
+          await sleep((p.hold ?? 300) / SPEED);
+          if (paused) await new Promise(r => pauseResume = r);
+        }
+        // No hard rest-return between tokens — fluid flow from one sign to next.
+        // Only a brief micro-pause for phrase separation.
+        await sleep(60 / SPEED);
+      }
+      currentToken = null; renderQueue();
+      await tweenTo(REST_TARGET(), 500);
+      nowEl.textContent = 'Idle.'; playing = false;
+    }
+
+    /* --- Render loop ---------------------------------------------------- */
+    const clock = new THREE.Clock();
+    // Subtle idle sway added on top of the clasped rest pose so the character
+    // keeps a hint of life when no sign is played. Applied AFTER applyState so
+    // it modulates the resolved bone quaternion; skipped mid-tween.
+    const _swayQ = new THREE.Quaternion();
+    const _swayE = new THREE.Euler();
+    function bodySway(t) {
+      if (!boneRig || paused) return;
+      // Hand Talk-style: continuous body sway, subtler during active signing
+      const amp = playing ? 0.02 : 0.035;
+      const headAmp = playing ? 0.012 : 0.018;
+      const s = Math.sin(t * 1.2) * amp;
+      const s2 = Math.sin(t * 0.7) * headAmp;
+      for (const side of [boneRig.armL, boneRig.armR]) {
+        if (!side.upperArm) continue;
+        _swayE.set(s, 0, s2, 'XYZ');
+        _swayQ.setFromEuler(_swayE);
+        side.upperArm.quaternion.multiply(_swayQ);
+      }
+    }
+    function animate() {
+      const dt = clock.getDelta();
+      if (mixer && idleOn) mixer.update(dt);
+      // Sign driver runs AFTER mixer so arm/hand bones get overwritten by pose state.
+      applyState();
+      bodySway(clock.elapsedTime);
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    /* --- UI wiring ------------------------------------------------------ */
+    const speedSlider = document.getElementById('speed');
+    const speedVal = document.getElementById('speedVal');
+    const speedBtns = document.querySelectorAll('[data-sp]');
+    function setSpeed(v, fromSlider = false) {
+      SPEED = v; speedVal.textContent = v.toFixed(1) + '×';
+      if (!fromSlider) speedSlider.value = v;
+      speedBtns.forEach(b => b.classList.toggle('on', parseFloat(b.dataset.sp) === v));
+    }
+    speedBtns.forEach(b => b.addEventListener('click', () => setSpeed(parseFloat(b.dataset.sp))));
+    speedSlider.addEventListener('input', () => setSpeed(parseFloat(speedSlider.value), true));
+
+    const rotateBtn = document.getElementById('rotate');
+    rotateBtn.addEventListener('click', () => {
+      controls.autoRotate = !controls.autoRotate;
+      rotateBtn.classList.toggle('on', controls.autoRotate);
+    });
+    document.getElementById('reset').addEventListener('click', () => {
+      camera.position.copy(CAM_DEFAULT); controls.target.copy(CAM_TARGET); controls.update();
+    });
+    const idleBtn = document.getElementById('idleAnim');
+    idleBtn.addEventListener('click', () => {
+      idleOn = !idleOn; idleBtn.classList.toggle('on', idleOn);
+      if (!idleOn && idleAction) { idleAction.stop(); idleAction.play(); idleAction.paused = true; }
+      else if (idleAction) { idleAction.paused = false; }
+    });
+
+    const micBtn = document.getElementById('mic');
+    const pauseBtn = document.getElementById('pause');
+    const replayBtn = document.getElementById('replay');
+    const clearBtn = document.getElementById('clear');
+    const transcriptEl = document.getElementById('transcript');
+    const statusEl = document.getElementById('status');
+    const counterEl = document.getElementById('counter');
+    const hintEl = document.getElementById('hint');
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null, listening = false, finalText = '', sentenceBuffer = '';
+
+    if (!SR) {
+      hintEl.textContent = 'Web Speech API not supported in this browser. Try Chrome or Edge.';
+      micBtn.disabled = true;
+    } else {
+      recognition = new SR();
+      recognition.continuous = true; recognition.interimResults = true; recognition.lang = 'en-US';
+      recognition.onresult = (e) => {
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) {
+            const text = r[0].transcript.trim();
+            finalText += (finalText ? ' ' : '') + text;
+            sentenceBuffer += ' ' + text;
+            enqueueText(text);
+            if (/[.!?]$/.test(text) || sentenceBuffer.split(/\s+/).length > 12) {
+              lastSentence = tokenize(sentenceBuffer); sentenceBuffer = ''; replayBtn.disabled = false;
+            } else replayBtn.disabled = lastSentence.length === 0;
+          } else interim += r[0].transcript;
+        }
+        render(interim);
+      };
+      recognition.onerror = (e) => { statusEl.textContent = 'Error: ' + e.error; };
+      recognition.onend = () => { if (listening) { try { recognition.start(); } catch { } } else statusEl.textContent = 'Stopped'; };
+    }
+    function render(interim) {
+      transcriptEl.innerHTML = escapeHtml(finalText) + (interim ? ` <span class="interim">${escapeHtml(interim)}</span>` : '');
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      counterEl.textContent = finalText.trim().split(/\s+/).filter(Boolean).length + ' words';
+    }
+    function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ '&': '&', '<': '<', '>': '>' }[c])); }
+
+    micBtn.addEventListener('click', () => {
+      if (!recognition) return;
+      if (listening) {
+        listening = false; recognition.stop();
+        micBtn.textContent = '🎤 Start listening'; micBtn.classList.remove('rec'); micBtn.classList.add('primary');
+        statusEl.textContent = 'Stopped';
+      } else {
+        listening = true; try { recognition.start(); } catch { }
+        micBtn.textContent = '⏹ Stop listening'; micBtn.classList.add('rec'); micBtn.classList.remove('primary');
+        statusEl.textContent = 'Listening…'; pauseBtn.disabled = false;
+      }
+    });
+    pauseBtn.addEventListener('click', () => {
+      paused = !paused;
+      pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+      if (!paused && pauseResume) { const r = pauseResume; pauseResume = null; r(); }
+    });
+    replayBtn.addEventListener('click', () => {
+      if (!lastSentence.length) return;
+      for (const t of lastSentence) queue.push({ ...t });
+      renderQueue(); if (!playing) playLoop();
+    });
+    clearBtn.addEventListener('click', () => {
+      finalText = ''; sentenceBuffer = ''; lastSentence = [];
+      queue.length = 0; currentToken = null;
+      transcriptEl.innerHTML = ''; counterEl.textContent = '0 words';
+      replayBtn.disabled = true; renderQueue();
+    });
+
+    // Manual text-to-sign input — feeds the exact same enqueueText pipeline the
+    // speech recogniser uses, so word lookup, fingerspelling fallback, speed, pause
+    // and replay all work identically.
+    const textInput = document.getElementById('textInput');
+    const translateBtn = document.getElementById('translateBtn');
+    function submitTypedText() {
+      const txt = textInput.value.trim();
+      if (!txt) return;
+      finalText += (finalText ? ' ' : '') + txt;
+      lastSentence = tokenize(txt);
+      render('');
+      enqueueText(txt);
+      replayBtn.disabled = lastSentence.length === 0;
+      pauseBtn.disabled = false;
+      textInput.value = '';
+    }
+    translateBtn.addEventListener('click', submitTypedText);
+    textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submitTypedText(); } });
+
+    /* --- Rest pose UI wiring ----------------------------------------------- */
+    // Build a rest pose object from slider IDs with a given prefix (restL_ or restR_)
+    function readRestFromSliders(prefix) {
+      const g = (id) => parseFloat(document.getElementById(prefix + id).value);
+      return {
+        shoulder: { pitch: g('sP'), yaw: g('sY'), roll: g('sR') },
+        elbow: { pitch: g('eP') },
+        wrist: { pitch: g('wP'), yaw: g('wY'), roll: g('wR') },
+        hand: {
+          spread: g('hSpread'),
+          thumb: { mcp: g('tMCP'), pip: g('tPIP'), dip: g('tDIP') },
+          index: { mcp: g('iMCP'), pip: g('iPIP'), dip: g('iDIP') },
+          middle: { mcp: g('mMCP'), pip: g('mPIP'), dip: g('mDIP') },
+          ring: { mcp: g('rMCP'), pip: g('rPIP'), dip: g('rDIP') },
+          pinky: { mcp: g('pMCP'), pip: g('pPIP'), dip: g('pDIP') }
+        }
+      };
+    }
+    // Update value display for all sliders with a prefix
+    function attachSliderListeners(prefix, rvalPrefix) {
+      const ids = [
+        'sP', 'sY', 'sR', 'eP', 'wP', 'wY', 'wR',
+        'hSpread', 'tMCP', 'tPIP', 'tDIP', 'iMCP', 'iPIP', 'iDIP',
+        'mMCP', 'mPIP', 'mDIP', 'rMCP', 'rPIP', 'rDIP', 'pMCP', 'pPIP', 'pDIP'
+      ];
+      for (const id of ids) {
+        const slider = document.getElementById(prefix + id);
+        const display = document.getElementById(rvalPrefix + id);
+        if (slider && display) {
+          slider.addEventListener('input', () => {
+            display.textContent = slider.value;
+          });
+        }
+      }
+    }
+    attachSliderListeners('restL_', 'rL_');
+    attachSliderListeners('restR_', 'rR_');
+
+    // Apply slider values to the mutable rest pose variables and update the avatar.
+    function applyRestToAvatar(side) {
+      if (side === 'left') {
+        REST_L = readRestFromSliders('restL_');
+        state.armL = deepClone(REST_L);
+      } else {
+        REST_R = readRestFromSliders('restR_');
+        state.armR = deepClone(REST_R);
+      }
+      applyState();
+    }
+
+    document.getElementById('applyRestL').addEventListener('click', () => applyRestToAvatar('left'));
+    document.getElementById('applyRestR').addEventListener('click', () => applyRestToAvatar('right'));
+
+    // Reset sliders to defaults and apply.
+    function resetSliders(prefix, rvalPrefix, side) {
+      const defs = side === 'left' ? REST_DEFAULTS_L() : REST_DEFAULTS_R();
+      const set = (id, val) => {
+        const slider = document.getElementById(prefix + id);
+        const display = document.getElementById(rvalPrefix + id);
+        if (slider) { slider.value = val; if (display) display.textContent = val; }
+      };
+      set('sP', defs.shoulder.pitch);
+      set('sY', defs.shoulder.yaw);
+      set('sR', defs.shoulder.roll);
+      set('eP', defs.elbow.pitch);
+      set('wP', defs.wrist.pitch);
+      set('wY', defs.wrist.yaw);
+      set('wR', defs.wrist.roll);
+      set('hSpread', defs.hand.spread);
+      set('tMCP', defs.hand.thumb.mcp);
+      set('tPIP', defs.hand.thumb.pip);
+      set('tDIP', defs.hand.thumb.dip);
+      set('iMCP', defs.hand.index.mcp);
+      set('iPIP', defs.hand.index.pip);
+      set('iDIP', defs.hand.index.dip);
+      set('mMCP', defs.hand.middle.mcp);
+      set('mPIP', defs.hand.middle.pip);
+      set('mDIP', defs.hand.middle.dip);
+      set('rMCP', defs.hand.ring.mcp);
+      set('rPIP', defs.hand.ring.pip);
+      set('rDIP', defs.hand.ring.dip);
+      set('pMCP', defs.hand.pinky.mcp);
+      set('pPIP', defs.hand.pinky.pip);
+      set('pDIP', defs.hand.pinky.dip);
+      if (side) applyRestToAvatar(side);
+    }
+    document.getElementById('resetRestL').addEventListener('click', () => resetSliders('restL_', 'rL_', 'left'));
+    document.getElementById('resetRestR').addEventListener('click', () => resetSliders('restR_', 'rR_', 'right'));
+
+    // Init: sync slider displays with initial values
+    (function initSliderDisplays() {
+      const sides = [
+        { prefix: 'restL_', rval: 'rL_' },
+        { prefix: 'restR_', rval: 'rR_' }
+      ];
+      const ids = [
+        'sP', 'sY', 'sR', 'eP', 'wP', 'wY', 'wR',
+        'hSpread', 'tMCP', 'tPIP', 'tDIP', 'iMCP', 'iPIP', 'iDIP',
+        'mMCP', 'mPIP', 'mDIP', 'rMCP', 'rPIP', 'rDIP', 'pMCP', 'pPIP', 'pDIP'
+      ];
+      for (const { prefix, rval } of sides) {
+        for (const id of ids) {
+          const slider = document.getElementById(prefix + id);
+          const display = document.getElementById(rval + id);
+          if (slider && display) display.textContent = slider.value;
+        }
+      }
+    })();
+  </script>
+</body>
+
+</html>
